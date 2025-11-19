@@ -1,5 +1,3 @@
-# db_utils.py
-
 import sqlite3
 import random
 import json
@@ -13,7 +11,7 @@ DB_NAME = "productos_soles.db"
 NUM_PRODUCTS = 500
 fake = Faker('es_ES') 
 global client 
-client = None # Se inicializará en app.py
+client = None # Se inicializará en app.py con la clave API
 
 # ==============================================================================
 # 1. GENERACIÓN Y POBLAMIENTO DE LA BASE DE DATOS (500 Productos en SOLES)
@@ -41,7 +39,7 @@ def generate_random_product(product_id):
     # Precio en Soles (S/ )
     cost = round(random.uniform(50.0, 5000.0), 2)
     price = round(cost * random.uniform(1.2, 2.5), 2) 
-    status = random.choice([True, True, True, False]) 
+    status = random.choice([True, True, True, False]) # 75% disponible
     suggested_prod_id = None
     if random.random() < 0.15:
         suggested_prod_id = f"PROD{random.randint(1, NUM_PRODUCTS):04d}"
@@ -99,11 +97,11 @@ def setup_sqlite_db_large(db_name, num_products):
         return conn
 
     except sqlite3.Error as e:
-        print(f"Error al configurar SQLite: {e}")
+        # Aquí puedes registrar el error en los logs de Streamlit si es necesario
         return None
 
 # ==============================================================================
-# 2. LÓGICA DEL CHATBOT: INTEGRACIÓN GEMINI + DB
+# 2. LÓGICA DEL CHATBOT: INTEGRACIÓN GEMINI + DB (MEJORADO)
 # ==============================================================================
 
 def get_product_data(user_query, conn):
@@ -119,13 +117,16 @@ def get_product_data(user_query, conn):
     """
     
     prompt_for_sql = f"""
-    Eres un experto en bases de datos. Tu única tarea es convertir la siguiente consulta de lenguaje natural del usuario 
+    Eres un experto en bases de datos SQLite. Tu única tarea es convertir la siguiente consulta de lenguaje natural del usuario 
     en una consulta SQL SELECT válida que busque la información en la tabla 'tbl_product'.
     
     Reglas estrictas:
     1. SOLO genera el comando SQL. NO agregues explicaciones, comillas ni texto adicional.
-    2. Usa LIKE para búsquedas por nombre. Si es general, usa LIMIT 5.
-    3. El esquema de la tabla es: {db_schema}.
+    2. Si el usuario pide el 'más caro', usa 'ORDER BY prod_price DESC LIMIT 1'.
+    3. Si el usuario pide 'ofertas', 'más baratos' o 'mejores precios', usa 'ORDER BY prod_price ASC LIMIT 3'.
+    4. Si el usuario pregunta por un 'tipo' o 'familia' (ej: electrónicos), usa 'WHERE prod_family LIKE %...%' y 'LIMIT 5'.
+    5. Solo considera productos cuyo campo 'status' sea TRUE (1), a menos que se especifique lo contrario (ej: el usuario pregunta por un producto específico inactivo).
+    6. El esquema de la tabla es: {db_schema}.
     
     Consulta del usuario: {user_query}
     """
@@ -140,6 +141,10 @@ def get_product_data(user_query, conn):
         )
         sql_query = response.text.strip()
         
+        # Validar y ejecutar el SQL
+        if not sql_query.lower().startswith("select"):
+             return [] 
+
         cur = conn.cursor()
         cur.execute(sql_query)
         results = cur.fetchall()
@@ -150,7 +155,7 @@ def get_product_data(user_query, conn):
         return products_info
 
     except Exception as e:
-        # print(f"Error en la generación de SQL o ejecución de DB: {e}") 
+        # Si la consulta SQL generada por el LLM falla al ejecutarse (ej: error de sintaxis)
         return []
 
 def chatbot_response(user_query, products_data):
@@ -161,8 +166,11 @@ def chatbot_response(user_query, products_data):
     system_instruction = (
         "Eres un amable asistente de ventas. Tu única fuente de información es el catálogo de productos proporcionado. "
         "Debes responder en un tono **siempre amable** y profesional. "
-        "Menciona explícitamente el precio y la disponibilidad. La moneda es el **Sol Peruano (S/ )**. "
-        "**Restricción Crucial:** SOLO puedes responder sobre los productos. Si la consulta NO está relacionada, debes responder amablemente que **solo puedes asistir con consultas sobre el catálogo**."
+        
+        "**Si recibes datos de productos (products_data):** DEBES utilizar estos datos para formular la respuesta. Por ejemplo, si los datos están ordenados por precio, infiere que el primer producto es la 'mejor oferta' o el 'más caro' y presenta la información de manera amigable. NO digas que 'no tienes información'."
+        
+        "Menciona explícitamente el precio, la descripción y la disponibilidad. La moneda es el **Sol Peruano (S/ )**. "
+        "**Restricción Crucial:** SOLO puedes responder sobre los productos. Si la consulta NO está relacionada O si NO SE ENCONTRÓ NINGÚN DATO DE LA DB, debes responder amablemente que solo puedes asistir con consultas sobre el catálogo."
     )
     
     if products_data:

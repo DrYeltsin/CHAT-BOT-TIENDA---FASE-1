@@ -101,7 +101,7 @@ def setup_sqlite_db_large(db_name, num_products):
         return None
 
 # ==============================================================================
-# 2. LÓGICA DEL CHATBOT: INTEGRACIÓN GEMINI + DB (FINAL Y ROBUSTA)
+# 2. LÓGICA DEL CHATBOT: INTEGRACIÓN GEMINI + DB (VERSIÓN FINAL)
 # ==============================================================================
 
 def get_product_data(user_query, conn):
@@ -122,14 +122,22 @@ def get_product_data(user_query, conn):
     
     Reglas estrictas:
     1. SOLO genera el comando SQL. NO agregues explicaciones, comillas ni texto adicional.
-    2. Si el usuario pide el 'más caro', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price DESC LIMIT 1'.
-    3. Si el usuario pide 'los 3 más caros', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price DESC LIMIT 3'.
-    4. Si el usuario pide 'ofertas', 'más baratos' o 'mejores precios', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price ASC LIMIT 3'.
-    5. Si el usuario pregunta por un 'ejemplo', 'muestra' o 'dame un producto', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY RANDOM() LIMIT 1'.
-    6. Si el usuario pide una combinación (ej: '2 caros y 2 baratos'), genera DOS sentencias SELECT completas separadas por un punto y coma (;).
-    7. Si el usuario pregunta por un 'tipo' o 'familia' sin especificar cantidad, usa 'WHERE prod_family LIKE %...%' y 'LIMIT 5'.
-    8. Solo considera productos cuyo campo 'status' sea TRUE (1), a menos que se especifique lo contrario.
-    9. El esquema de la tabla es: {db_schema}.
+    
+    2. LÍMITE MÁXIMO: Nunca devuelvas más de 5 productos por consulta simple. Si el usuario pide "10 productos" o "todos", usa SIEMPRE 'LIMIT 5'.
+    
+    3. Si el usuario pide el 'más caro', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price DESC LIMIT 1'.
+    4. Si el usuario pide 'los N más caros' (donde N <= 5), usa LIMIT N. Si N > 5, usa LIMIT 5.
+    
+    5. Si el usuario pide 'ofertas', 'más baratos' o 'mejores precios', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price ASC LIMIT 5'.
+    
+    6. Si el usuario pregunta por un 'ejemplo', 'muestra' o 'dame un producto', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY RANDOM() LIMIT 1'.
+    
+    7. REGLA DE COMBINACIÓN: Si el usuario pide MÚLTIPLES grupos (ej: '1 caro y 3 baratos'), genera sentencias separadas por punto y coma (;).
+    
+    8. Si el usuario pregunta por un 'tipo', 'familia' o 'categoría' sin especificar cantidad, SIEMPRE usa 'WHERE prod_family LIKE %...%' y 'LIMIT 5'.
+    
+    9. Solo considera productos cuyo campo 'status' sea TRUE (1).
+    10. El esquema de la tabla es: {db_schema}.
     
     Consulta del usuario: {user_query}
     """
@@ -158,12 +166,12 @@ def get_product_data(user_query, conn):
             try:
                 cur.execute(query)
                 results = cur.fetchall()
-                column_names = [description[0] for description in cur.description]
-                # Agregar los resultados de esta consulta a la lista general
-                products_info.extend([dict(zip(column_names, row)) for row in results])
+                if results:
+                    column_names = [description[0] for description in cur.description]
+                    # Agregar los resultados de esta consulta a la lista general
+                    products_info.extend([dict(zip(column_names, row)) for row in results])
             except Exception as e:
                 # Si una sub-consulta falla, continuamos con la siguiente
-                print(f"Error ejecutando sub-consulta: {e}")
                 continue
         
         return products_info
@@ -181,11 +189,11 @@ def chatbot_response(user_query, products_data):
         "Debes responder en un tono **siempre amable** y profesional. "
         
         "**Si recibes datos de productos (products_data):** DEBES utilizar estos datos para formular la respuesta. "
-        "Si hay varios productos, lístalos amablemente. Si el usuario pidió 'el más caro' y 'el más barato', identifica cuál es cuál basándote en el precio y preséntalos. "
+        "Si hay varios productos, lístalos amablemente. "
         "**PROHIBIDO RESPONDER FRASES COMO:** 'Lamento informarte', 'no tengo información', 'no he podido encontrar', etc. si 'products_data' contiene datos. "
         
         "Menciona explícitamente el precio, la descripción y la disponibilidad. La moneda es el **Sol Peruano (S/ )**. "
-        "Si muestras una lista, menciona al final: '(Recuerda que solo podemos mostrar un máximo de 5 productos por consulta, pero tenemos más en el catálogo)'."
+        "Si la lista contiene 5 elementos, menciona al final: '(He limitado la lista a 5 productos para mayor claridad, pero tenemos más en el catálogo)'."
         
         "**Restricción Crucial:** SOLO puedes responder sobre los productos. Si la consulta NO está relacionada O si NO SE ENCONTRÓ NINGÚN DATO DE LA DB, debes responder amablemente que solo puedes asistir con consultas sobre el catálogo."
     )

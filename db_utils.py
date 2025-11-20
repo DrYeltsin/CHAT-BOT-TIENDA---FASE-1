@@ -101,11 +101,11 @@ def setup_sqlite_db_large(db_name, num_products):
         return None
 
 # ==============================================================================
-# 2. LÓGICA DEL CHATBOT: INTEGRACIÓN GEMINI + DB (MEJORADO)
+# 2. LÓGICA DEL CHATBOT: INTEGRACIÓN GEMINI + DB (FINAL Y ROBUSTA)
 # ==============================================================================
 
 def get_product_data(user_query, conn):
-    """Usa Gemini para generar una consulta SQL basada en la pregunta del usuario y la ejecuta en la DB."""
+    """Usa Gemini para generar SQL (soporta múltiples consultas) y ejecuta en la DB."""
     if not client:
         return []
         
@@ -118,15 +118,18 @@ def get_product_data(user_query, conn):
     
     prompt_for_sql = f"""
     Eres un experto en bases de datos SQLite. Tu única tarea es convertir la siguiente consulta de lenguaje natural del usuario 
-    en una consulta SQL SELECT válida que busque la información en la tabla 'tbl_product'.
+    en una o más consultas SQL SELECT válidas que busquen la información en la tabla 'tbl_product'.
     
     Reglas estrictas:
     1. SOLO genera el comando SQL. NO agregues explicaciones, comillas ni texto adicional.
-    2. Si el usuario pide el 'más caro', usa 'ORDER BY prod_price DESC LIMIT 1'.
-    3. Si el usuario pide 'ofertas', 'más baratos' o 'mejores precios', usa 'ORDER BY prod_price ASC LIMIT 3'.
-    4. Si el usuario pregunta por un 'tipo' o 'familia' (ej: electrónicos), usa 'WHERE prod_family LIKE %...%' y 'LIMIT 5'.
-    5. Solo considera productos cuyo campo 'status' sea TRUE (1), a menos que se especifique lo contrario (ej: el usuario pregunta por un producto específico inactivo).
-    6. El esquema de la tabla es: {db_schema}.
+    2. Si el usuario pide el 'más caro', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price DESC LIMIT 1'.
+    3. Si el usuario pide 'los 3 más caros', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price DESC LIMIT 3'.
+    4. Si el usuario pide 'ofertas', 'más baratos' o 'mejores precios', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY prod_price ASC LIMIT 3'.
+    5. Si el usuario pregunta por un 'ejemplo', 'muestra' o 'dame un producto', usa 'SELECT * FROM tbl_product WHERE status = 1 ORDER BY RANDOM() LIMIT 1'.
+    6. Si el usuario pide una combinación (ej: '2 caros y 2 baratos'), genera DOS sentencias SELECT completas separadas por un punto y coma (;).
+    7. Si el usuario pregunta por un 'tipo' o 'familia' sin especificar cantidad, usa 'WHERE prod_family LIKE %...%' y 'LIMIT 5'.
+    8. Solo considera productos cuyo campo 'status' sea TRUE (1), a menos que se especifique lo contrario.
+    9. El esquema de la tabla es: {db_schema}.
     
     Consulta del usuario: {user_query}
     """
@@ -141,21 +144,31 @@ def get_product_data(user_query, conn):
         )
         sql_query = response.text.strip()
         
-        # Validar y ejecutar el SQL
-        if not sql_query.lower().startswith("select"):
-             return [] 
-
-        cur = conn.cursor()
-        cur.execute(sql_query)
-        results = cur.fetchall()
+        # Procesamiento de múltiples sentencias separadas por punto y coma
+        queries = [q.strip() for q in sql_query.split(';') if q.strip()]
+        products_info = []
         
-        column_names = [description[0] for description in cur.description]
-        products_info = [dict(zip(column_names, row)) for row in results]
+        cur = conn.cursor()
+        
+        for query in queries:
+            # Validación básica de seguridad y sintaxis
+            if not query.lower().startswith("select"):
+                continue
+                
+            try:
+                cur.execute(query)
+                results = cur.fetchall()
+                column_names = [description[0] for description in cur.description]
+                # Agregar los resultados de esta consulta a la lista general
+                products_info.extend([dict(zip(column_names, row)) for row in results])
+            except Exception as e:
+                # Si una sub-consulta falla, continuamos con la siguiente
+                print(f"Error ejecutando sub-consulta: {e}")
+                continue
         
         return products_info
 
     except Exception as e:
-        # Si la consulta SQL generada por el LLM falla al ejecutarse (ej: error de sintaxis)
         return []
 
 def chatbot_response(user_query, products_data):
@@ -167,12 +180,14 @@ def chatbot_response(user_query, products_data):
         "Eres un amable asistente de ventas. Tu única fuente de información es el catálogo de productos proporcionado. "
         "Debes responder en un tono **siempre amable** y profesional. "
         
-        "**Si recibes datos de productos (products_data):** DEBES utilizar estos datos para formular la respuesta. Por ejemplo, si los datos están ordenados por precio, infiere que el primer producto es la 'mejor oferta' o el 'más caro' y presenta la información de manera amigable. **PROHIBIDO RESPONDER FRASES COMO:** 'Lamento informarte', 'no tengo información', 'no he podido encontrar', etc. "
+        "**Si recibes datos de productos (products_data):** DEBES utilizar estos datos para formular la respuesta. "
+        "Si hay varios productos, lístalos amablemente. Si el usuario pidió 'el más caro' y 'el más barato', identifica cuál es cuál basándote en el precio y preséntalos. "
+        "**PROHIBIDO RESPONDER FRASES COMO:** 'Lamento informarte', 'no tengo información', 'no he podido encontrar', etc. si 'products_data' contiene datos. "
         
         "Menciona explícitamente el precio, la descripción y la disponibilidad. La moneda es el **Sol Peruano (S/ )**. "
-        "**Restricción Crucial:** SOLO puedes responder sobre los productos. Si la consulta NO está relacionada O si NO SE ENCONTRÓ NINGÚN DATO DE LA DB, debes responder amablemente que solo puedes asistir con consultas sobre el catálogo."
+        "Si muestras una lista, menciona al final: '(Recuerda que solo podemos mostrar un máximo de 5 productos por consulta, pero tenemos más en el catálogo)'."
         
-        "Si solo se encuentra un producto, usa este formato: [Nombre del producto]: [Descripción] | Precio: S/ [Precio] | Disponible: [Sí/No]."
+        "**Restricción Crucial:** SOLO puedes responder sobre los productos. Si la consulta NO está relacionada O si NO SE ENCONTRÓ NINGÚN DATO DE LA DB, debes responder amablemente que solo puedes asistir con consultas sobre el catálogo."
     )
     
     if products_data:
